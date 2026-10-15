@@ -1,8 +1,10 @@
 <?php
 require_once dirname(__DIR__) . '/app/bootstrap.php';
 $user = require_user();
-$entries = query('SELECT amount,action,reference,created_at FROM wallet_entries WHERE user_id=? ORDER BY entry_id DESC LIMIT 50', [$user['user_id']])->fetchAll();
-$orders = query('SELECT order_id,amount,status,created_at FROM membership_orders WHERE user_id=? ORDER BY created_at DESC,order_id DESC LIMIT 20', [$user['user_id']])->fetchAll();
+$snapshot = wallet_snapshot((int) $user['user_id']);
+$user = array_merge($user, $snapshot['wallet']);
+$entries = $snapshot['entries'];
+$orders = $snapshot['orders'];
 $labels = ['post'=>'發佈心得','comment'=>'參與留言','vote'=>'首次評價','membership'=>'Premium 升級','sandbox_credit'=>'示範加點','opening_balance'=>'原有餘額'];
 page_start('點數與會員', $user);
 ?>

@@ -51,6 +51,13 @@ function transaction(callable $operation): mixed
     }
 }
 
+/** Keep related reads on one committed version without blocking wallet writers. */
+function read_snapshot(callable $operation): mixed
+{
+    db()->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
+    return transaction($operation);
+}
+
 function e(mixed $value): string
 {
     return htmlspecialchars((string) ($value ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');

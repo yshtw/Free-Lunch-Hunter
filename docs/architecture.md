@@ -39,7 +39,11 @@ This is a **synchronous points redemption**, not a payment checkout. The order h
 
 Voting sets a desired state (`-1`, `0`, `1`); repeating the state does nothing. The article row is locked before applying its score delta, so concurrent voters cannot lose score updates. Lock order for reward-bearing operations is wallet first, then article. Wallet history is append-only through application services. Deleting an article does not erase its historical reward events or reverse earned points; these are the current product rules.
 
-The suite verifies `SUM(wallet_entries.amount) = premium.money` for every fixture account. An application bug or manual SQL could still break that invariant. A production system should add periodic reconciliation, restricted database grants, fraud controls, and administrative adjustments with their own events. There is no claim of financial-grade accounting here.
+The suite verifies `SUM(wallet_entries.amount) = premium.money` for every fixture account. An application bug or manual SQL could still break that invariant. `scripts/reconcile.php` provides an executable, read-only check across all accounts or a selected account. Besides exact-decimal balance reconciliation, it detects missing wallets, missing/wrong membership debits, orphan debits, and entitlement/order mismatches. An administrator may have zero or one historical purchase, because the CLI role grant is separate from buying Premium. See the [operations runbook](operations.md) for output and exit semantics.
+
+The wallet page, wallet API, and reconciliation command explicitly use a read-only `REPEATABLE READ` transaction. The first query establishes an InnoDB snapshot shared by subsequent reads. A concurrent commit cannot produce a stale balance with newer ledger entries or a false reconciliation alert. Reads do not lock wallets, and the transaction finishes before rendering HTML or emitting JSON. The test suite pauses a reader between queries, commits a credit through another HTTP session, and verifies that both reads retain their original state even when the connection's default isolation is `READ COMMITTED`.
+
+Scheduling the command and routing alerts are deployment responsibilities. A production system still needs restricted database grants, fraud controls, and administrative adjustments with their own events. There is no claim of financial-grade accounting here.
 
 ## HTTP and data boundaries
 
@@ -66,4 +70,4 @@ An unversioned existing database is intentionally rejected before creating appli
 
 The regression suite exercises actual HTTP requests and actual MariaDB transactions. Its storage-failure test installs a temporary trigger only in an isolated `_test` database, causes a membership ledger insert to fail, and verifies that no order, debit, or entitlement survives. Concurrent tests use four PHP worker processes and four independently authenticated sessions.
 
-The tests demonstrate correctness for these selected workflows. They are not a load benchmark, penetration test, uptime measurement, or proof of distributed exactly-once delivery. APAC timezone and currency requirements would need explicit product decisions: this demo uses Asia/Taipei presentation time and a single nonmonetary points unit.
+The tests demonstrate correctness for these selected workflows. They are not a load benchmark, penetration test, uptime measurement, or proof of distributed exactly-once delivery. Reconciliation scans the complete ledger in one snapshot; large installations would need an explicitly designed incremental or batched strategy. APAC timezone and currency requirements would need explicit product decisions: this demo uses Asia/Taipei presentation time and a single nonmonetary points unit.

@@ -17,6 +17,8 @@ paths:
         Only resource=health is public. Other resources require the flh_session
         cookie and return only the authenticated account's data. Wallet history
         is limited to 50 entries; order history to 20 orders, newest first.
+        Wallet balance and entries come from the same committed snapshot. The
+        sum of the returned 50 entries need not equal the lifetime balance.
         Health performs a real database query and returns 500 if it fails.
       security:
         - sessionCookie: []

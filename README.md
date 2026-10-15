@@ -9,6 +9,8 @@ The backend emphasizes the parts of commerce that must remain correct when reque
 - **Transactional membership orders:** the order, wallet debit, and membership entitlement commit together. The wallet row is locked before checking balance or changing state.
 - **Safe retries:** an idempotency key is scoped to the authenticated account. Concurrent retries return the original order; competing new requests cannot purchase an already-owned membership.
 - **Wallet audit trail:** rewards and debits have unique event references. Repeated vote changes cannot farm rewards. The test suite reconciles wallet balances against the ledger.
+- **Operational reconciliation:** a read-only CLI checks balances, order debits, missing wallets, and membership entitlements using exact database decimals. It reports drift and unavailable checks with distinct exit codes.
+- **Consistent wallet reads:** the API and wallet page read balances, entries, and receipts from one committed snapshot, including when another session completes a transaction.
 - **Explicit access boundaries:** public registration always creates a regular member. Administrator access is granted through a CLI command. Article and activity writes check ownership.
 - **Defensive HTTP handling:** CSRF protection on every mutation, regenerated login sessions, prepared statements, escaped output, validated uploads, and correlated errors without SQL details.
 - **Reproducibility:** a versioned, checksummed schema, Docker Compose, a JSON API contract, and a real MariaDB/HTTP regression suite with concurrent requests and injected storage failure.
@@ -70,12 +72,25 @@ python3 tests/integration.py
 
 The suite starts a four-worker PHP server on a free loopback port, applies migrations twice, creates unique fixtures, and removes its own accounts with foreign-key cascades. It uses separate login sessions for concurrent requests so PHP session locking cannot hide database races. Coverage includes role escalation, CSRF, cross-account edits, duplicate votes, wallet retry conflicts, insufficient balance, transaction rollback, concurrent membership purchases, and ledger reconciliation. There is no browser or external service dependency in this suite.
 
-[GitHub Actions](.github/workflows/ci.yml) runs syntax checks and the same suite against case-sensitive MariaDB defaults. A workflow file is provided; a hosted CI run still requires pushing the branch.
+Reconciliation tests deliberately introduce a 0.01-point difference, a balanced but incorrect order debit, an orphan debit, a missing wallet, and an unearned entitlement. A separate test pauses a read snapshot while another authenticated session commits a credit, then verifies that both reads still describe the original committed state.
+
+[GitHub Actions](.github/workflows/ci.yml) runs syntax checks and the same suite against case-sensitive MariaDB defaults. Check the pull request's workflow runs for hosted results; the [validation record](docs/validation.md) distinguishes local checks from hosted evidence.
+
+### Check a running installation
+
+```bash
+docker compose exec -T app php scripts/reconcile.php
+# Optional: limit an investigation to one internal account ID.
+docker compose exec -T app php scripts/reconcile.php --user-id=123
+```
+
+The command returns JSON and exits **0** for clean data, **1** for detected inconsistencies, or **2** if the check could not run. It never repairs records or prints emails/passwords. See the [operations runbook](docs/operations.md) for the checks and response steps.
 
 ## Design and demonstration
 
 - [Architecture and tradeoffs](docs/architecture.md)
 - [OpenAPI contract](docs/openapi.yaml)
+- [Reconciliation and operations](docs/operations.md)
 - [Five-minute interview walkthrough and role alignment](docs/portfolio.md)
 - [AI-assisted development and verification](docs/ai-development.md)
 
