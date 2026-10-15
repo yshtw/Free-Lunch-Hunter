@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import signal
 import socket
 import subprocess
@@ -114,7 +115,7 @@ class BackendTests(unittest.TestCase):
             cls.stop_server()
             raise RuntimeError('PHP server did not become ready')
         cls.accounts = {}
-        for role in ['user', 'other', 'admin', 'buyer', 'racer', 'poor']:
+        for role in ['user', 'other', 'admin', 'buyer', 'racer', 'poor', 'auditor']:
             account = {'email':f'{MARKER}_{role}@example.invalid', 'username':f'{MARKER}_{role}',
                 'password':secrets.token_urlsafe(24), 'birth_date':'2000-01-01'}
             browser = Browser(cls.base)
@@ -168,6 +169,12 @@ class BackendTests(unittest.TestCase):
             return browser
         with concurrent.futures.ThreadPoolExecutor(4) as pool:
             return list(pool.map(login, range(4)))
+
+    def reconcile(self, role=None):
+        arguments = [] if role is None else [f'--user-id={self.account(role)[0]["id"]}']
+        result = subprocess.run([PHP, 'scripts/reconcile.php', *arguments], cwd=ROOT, env=ENV,
+            text=True, capture_output=True, timeout=20)
+        return result, json.loads(result.stdout) if result.stdout else None
 
     def test_01_registration_cannot_choose_admin(self):
         for role in ['user', 'other', 'buyer', 'racer', 'poor']:
@@ -353,6 +360,139 @@ class BackendTests(unittest.TestCase):
         for table in ['articles','comments','votes']:
             self.assertEqual(int(scalar(f'SELECT COUNT(*) FROM {table} WHERE article_id=?',[article])),0)
         self.assertEqual(int(scalar("SELECT COUNT(*) FROM wallet_entries WHERE user_id=? AND action='post' AND reference=?",[account['id'],str(article)])),1)
+
+    def test_16_reconciliation_checks_clean_accounts_without_personal_data(self):
+        for role, (account, _) in self.accounts.items():
+            result, report = self.reconcile(role)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(report['status'], 'ok')
+            self.assertEqual(report['accounts_checked'], 1)
+            self.assertEqual(report['issues'], [])
+            self.assertNotIn(account['email'], result.stdout)
+            self.assertNotIn(account['username'], result.stdout)
+        result, report = self.reconcile()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(report['accounts_checked'], len(self.accounts))
+
+    def test_17_reconciliation_detects_exact_decimal_drift_and_is_read_only(self):
+        account, _ = self.account('auditor')
+        before = self.balance('auditor')
+        sql('UPDATE premium SET money=money+0.01 WHERE user_id=?', [account['id']])
+        try:
+            result, report = self.reconcile('auditor')
+            self.assertEqual(result.returncode, 1)
+            issue, = report['issues']
+            self.assertEqual(issue['check'], 'wallet_balance')
+            self.assertEqual(Decimal(issue['difference']), Decimal('0.01'))
+            self.assertEqual(self.balance('auditor'), before+Decimal('0.01'))
+            # A scoped report must not include another account's drift.
+            self.assertEqual(self.reconcile('other')[0].returncode, 0)
+        finally:
+            sql('UPDATE premium SET money=money-0.01 WHERE user_id=?', [account['id']])
+
+    def test_18_reconciliation_detects_order_debit_even_when_wallet_balances(self):
+        account, browser = self.account('auditor')
+        self.assertEqual(self.credit('auditor', 60)[0], 200)
+        status, body, _ = browser.order(uuid.uuid4().hex)
+        self.assertEqual(status, 201)
+        order_id = json.loads(body)['order']['order_id']
+        self.assertEqual(self.reconcile('auditor')[0].returncode, 0)
+        sql("UPDATE wallet_entries SET amount=-29.99 WHERE user_id=? AND action='membership' AND reference=?", [account['id'], order_id])
+        sql('UPDATE premium SET money=money+0.01 WHERE user_id=?', [account['id']])
+        try:
+            result, report = self.reconcile('auditor')
+            self.assertEqual(result.returncode, 1)
+            issue, = report['issues']
+            self.assertEqual(issue['check'], 'membership_debit')
+            self.assertEqual(issue['order_id'], order_id)
+            self.assertEqual(Decimal(issue['ledger_amount']), Decimal('-29.99'))
+        finally:
+            sql("UPDATE wallet_entries SET amount=-30 WHERE user_id=? AND action='membership' AND reference=?", [account['id'], order_id])
+            sql('UPDATE premium SET money=money-0.01 WHERE user_id=?', [account['id']])
+        sql("UPDATE wallet_entries SET reference=? WHERE user_id=? AND action='membership' AND reference=?", ['missing_'+order_id, account['id'], order_id])
+        try:
+            result, report = self.reconcile('auditor')
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual({issue['check'] for issue in report['issues']}, {'membership_debit', 'orphan_membership_debit'})
+        finally:
+            sql("UPDATE wallet_entries SET reference=? WHERE user_id=? AND action='membership' AND reference=?", [order_id, account['id'], 'missing_'+order_id])
+        # Promoting a paying member to administrator preserves a valid historical order.
+        sql('UPDATE premium SET premium=2 WHERE user_id=?', [account['id']])
+        try:
+            self.assertEqual(self.reconcile('auditor')[0].returncode, 0)
+        finally:
+            sql('UPDATE premium SET premium=1 WHERE user_id=?', [account['id']])
+
+    def test_19_reconciliation_detects_missing_wallet_and_unearned_entitlement(self):
+        account, _ = self.account('poor')
+        sql('UPDATE premium SET premium=1 WHERE user_id=?', [account['id']])
+        try:
+            result, report = self.reconcile('poor')
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual([issue['check'] for issue in report['issues']], ['membership_entitlement'])
+        finally:
+            sql('UPDATE premium SET premium=0 WHERE user_id=?', [account['id']])
+        before = self.balance('poor')
+        sql('DELETE FROM premium WHERE user_id=?', [account['id']])
+        try:
+            result, report = self.reconcile('poor')
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual([issue['check'] for issue in report['issues']], ['missing_wallet'])
+        finally:
+            sql('INSERT INTO premium(user_id,premium,money) VALUES(?,0,?)', [account['id'], str(before)])
+
+    def test_20_snapshot_remains_consistent_while_another_session_commits(self):
+        account, _ = self.account('auditor')
+        before = self.balance('auditor')
+        # Pause between two real reads; an independent HTTP writer commits in between.
+        script = '''require "app/bootstrap.php";
+            db()->exec("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
+            $result = read_snapshot(function () use ($argv) {
+                $balance = query("SELECT money FROM premium WHERE user_id=?", [$argv[1]])->fetchColumn();
+                echo "snapshot-ready\\n"; fflush(STDOUT);
+                if (trim(fgets(STDIN)) !== "continue") throw new RuntimeException("Barrier failed");
+                return ["balance"=>$balance, "ledger_total"=>query(
+                    "SELECT COALESCE(SUM(amount),0) FROM wallet_entries WHERE user_id=?", [$argv[1]])->fetchColumn()];
+            });
+            echo json_encode($result);'''
+        with tempfile.TemporaryFile(mode='w+') as errors:
+            process = subprocess.Popen([PHP, '-r', script, str(account['id'])], cwd=ROOT, env=ENV,
+                text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0], 'Snapshot did not become ready')
+                self.assertEqual(process.stdout.readline().strip(), 'snapshot-ready')
+                self.assertEqual(self.credit('auditor', 1)[0], 200)
+                output, _ = process.communicate('continue\n', timeout=10)
+                self.assertEqual(process.returncode, 0)
+                snapshot = json.loads(output)
+                self.assertEqual(Decimal(snapshot['balance']), before)
+                self.assertEqual(Decimal(snapshot['ledger_total']), before)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+        self.assertEqual(self.balance('auditor'), before+1)
+        status, body, _ = self.account('auditor')[1].request('api.php?resource=wallet')
+        self.assertEqual(status, 200)
+        wallet = json.loads(body)
+        self.assertEqual(Decimal(wallet['balance']), before+1)
+        self.assertEqual(sum(Decimal(entry['amount']) for entry in wallet['entries']), before+1)
+
+    def test_21_reconciliation_does_not_report_success_on_operator_errors(self):
+        for argument in ['--user-id=0', '--user-id=abc', '--user-id=2147483647', '--unknown']:
+            result = subprocess.run([PHP, 'scripts/reconcile.php', argument], cwd=ROOT, env=ENV,
+                text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, '')
+            self.assertTrue(result.stderr)
+        result = subprocess.run([PHP, 'scripts/reconcile.php'], cwd=ROOT,
+            env=dict(ENV, DB_DSN='mysql:unix_socket=/nonexistent/flh.sock;dbname=unavailable_test'),
+            text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('Reconciliation unavailable', result.stderr)
+        self.assertNotIn('/nonexistent', result.stderr)
+        self.assertEqual(self.reconcile()[0].returncode, 0)
 
 
 if __name__ == '__main__':

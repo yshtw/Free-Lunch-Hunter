@@ -10,8 +10,8 @@ $user = require_user();
 $id = (int) $user['user_id'];
 if ($resource === 'session' && $method === 'GET') json_response(['user'=>$user,'csrf_token'=>csrf_token()]);
 if ($resource === 'wallet' && $method === 'GET') {
-    $entries = query('SELECT entry_id,amount,action,reference,created_at FROM wallet_entries WHERE user_id=? ORDER BY entry_id DESC LIMIT 50', [$id])->fetchAll();
-    json_response(['balance'=>$user['money'],'unit'=>'community_points','entries'=>$entries]);
+    $snapshot = wallet_snapshot($id);
+    json_response(['balance'=>$snapshot['wallet']['money'],'unit'=>'community_points','entries'=>$snapshot['entries']]);
 }
 if ($resource === 'membership-orders') {
     if ($method === 'GET') json_response(['orders'=>query('SELECT order_id,product_code,amount,status,created_at FROM membership_orders WHERE user_id=? ORDER BY created_at DESC,order_id DESC LIMIT 20', [$id])->fetchAll()]);

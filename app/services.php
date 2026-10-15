@@ -57,6 +57,23 @@ function lock_wallet(int $userId): array
     return $wallet;
 }
 
+function wallet_snapshot(int $userId): array
+{
+    return read_snapshot(function () use ($userId): array {
+        $wallet = query('SELECT premium,money FROM premium WHERE user_id=?', [$userId])->fetch();
+        if (!$wallet) {
+            throw new HttpError(404, '會員帳戶不存在。');
+        }
+        return [
+            'wallet' => $wallet,
+            'entries' => query('SELECT entry_id,amount,action,reference,created_at FROM wallet_entries
+                WHERE user_id=? ORDER BY entry_id DESC LIMIT 50', [$userId])->fetchAll(),
+            'orders' => query('SELECT order_id,product_code,amount,status,created_at FROM membership_orders
+                WHERE user_id=? ORDER BY created_at DESC,order_id DESC LIMIT 20', [$userId])->fetchAll(),
+        ];
+    });
+}
+
 /** Must run in the same transaction as the domain write, with the wallet row locked. */
 function wallet_entry(int $userId, int $amount, string $action, string $reference): bool
 {
