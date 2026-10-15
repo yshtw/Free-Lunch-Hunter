@@ -1,0 +1,33 @@
+name: Backend regression
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: integration-test-only
+          MARIADB_DATABASE: free_lunch_hunter_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=3s --health-timeout=3s --health-retries=30
+    env:
+      DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=free_lunch_hunter_test;charset=utf8mb4
+      DB_USERNAME: root
+      DB_PASSWORD: integration-test-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, fileinfo
+          coverage: none
+      - run: sh scripts/lint.sh
+      - name: Verify case-sensitive database defaults
+        run: php -r 'require "app/bootstrap.php"; if ((int) query("SELECT @@lower_case_table_names")->fetchColumn() !== 0) exit(1);'
+      - run: python3 tests/integration.py

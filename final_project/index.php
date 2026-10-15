@@ -1,338 +1,125 @@
 <?php
-require 'config.php';
-require 'money.php';
-require 'premium_check.php';
-
-// 確認會話是否已啟動
-if (session_status() == PHP_SESSION_NONE) {
-    session_start();
+require_once dirname(__DIR__) . '/app/bootstrap.php';
+$user = require_user();
+$id = (int) $user['user_id'];
+$premium = (int) $user['premium'] > 0;
+$search = text($_GET, 'q', 100, false);
+$order = ($_GET['sort'] ?? '') === 'popular' && $premium ? 'a.rate DESC,a.article_id DESC' : 'a.art_date DESC,a.article_id DESC';
+$page = max(1, min(10000, (int) ($_GET['page'] ?? 1)));
+$offset = ($page - 1) * 5;
+$activities = query('SELECT a.activity_id,a.title,a.content,a.act_date,a.place,a.lunch,a.url,
+    TIME_FORMAT(a.startt,\'%H:%i\') AS start_time,TIME_FORMAT(a.endt,\'%H:%i\') AS end_time,
+    EXISTS(SELECT 1 FROM join_activity j WHERE j.activity_id=a.activity_id AND j.user_id=?) AS joined
+    FROM activities a WHERE a.act_date>=CURDATE() AND (a.title LIKE ? OR a.place LIKE ?)
+    ORDER BY a.act_date,a.startt,a.activity_id LIMIT 12', [$id, '%'.$search.'%', '%'.$search.'%'])->fetchAll();
+$articles = query('SELECT a.*,u.username,v.rate AS user_rate FROM articles a JOIN user_account u ON u.user_id=a.user_id
+    LEFT JOIN votes v ON v.article_id=a.article_id AND v.user_id=? ORDER BY '.$order.' LIMIT 6 OFFSET '.$offset, [$id])->fetchAll();
+$hasNext = count($articles) > 5;
+$articles = array_slice($articles, 0, 5);
+$comments = [];
+if ($articles) {
+    $ids = array_column($articles, 'article_id');
+    $rows = query('SELECT c.*,u.username FROM comments c JOIN user_account u ON u.user_id=c.user_id
+        WHERE c.article_id IN ('.implode(',', array_fill(0, count($ids), '?')).') ORDER BY c.comm_date,c.comment_id', $ids)->fetchAll();
+    foreach ($rows as $row) $comments[$row['article_id']][] = $row;
 }
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit;
-}
-
-// 確認用戶已登入
-$user_id = $_SESSION['user_id'];
-
-if (isPremium($user_id, $conn) == 1) {
-    header('Location: premiumindex.php');
-    exit;
-} elseif (isPremium($user_id, $conn) == 2) {
-    header('Location: admin_dashboard.php');
-    exit;
-}
-
-// 獲取用戶資訊
-$sql = "SELECT username FROM user_account WHERE user_id = :user_id";
-$stmt = $conn->prepare($sql);
-$stmt->bindParam(':user_id', $user_id);
-$stmt->execute();
-$user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-// 獲取用戶餘額
-$userBalance = getUserBalance($user_id, $conn);
+$schedule = query('SELECT a.title,a.act_date,TIME_FORMAT(a.startt,\'%H:%i\') AS start_time FROM activities a
+    JOIN join_activity j ON j.activity_id=a.activity_id WHERE j.user_id=? AND a.act_date>=CURDATE()
+    ORDER BY a.act_date,a.startt LIMIT 8', [$id])->fetchAll();
+page_start('探索活動', $user);
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-    <meta charset="UTF-8">
-    <title>免費午餐分享平台</title>
-    <link rel="stylesheet" href="styleopen.css">
-    <link rel='stylesheet' href='https://fullcalendar.io/releases/fullcalendar/3.9.0/fullcalendar.min.css' />
-    <script src='https://fullcalendar.io/releases/fullcalendar/3.9.0/lib/jquery.min.js'></script>
-    <script src='https://fullcalendar.io/releases/fullcalendar/3.9.0/lib/moment.min.js'></script>
-    <script src='https://fullcalendar.io/releases/fullcalendar/3.9.0/fullcalendar.min.js'></script>
-</head>
-
-<body>
-    <?php require 'navbar.php'; ?>
-
-    <div class="container">
-        <header>
-            <h1>歡迎，<?php echo htmlspecialchars($user['username']); ?>！</h1>
-        </header>
-
-        <h2>免費午餐活動行事曆</h2>
-        <div id='calendar'></div>
-
-        <h2 style="color:#0d47a1;">最新活動</h2>
-            <div id="activities">
-                <?php
-                // 初始化 $activities 為空數組，避免未定義變量錯誤
-                $activities = [];
-
-                // 獲取最新的活動，並排除過期的活動
-                $current_time = date('Y-m-d'); // 目前時間
-                $sql = "SELECT activity_id, title, content, act_date, img, place, STARTT, ENDT, URL, LUNCH 
-            FROM activities 
-            WHERE act_date > :current_time
-            LIMIT 3";
-                $stmt = $conn->prepare($sql);
-                $stmt->bindParam(':current_time', $current_time);
-                $stmt->execute();
-                $activities = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                if ($activities) {
-                    // 取得用戶已加入的活動
-                    $sql_joined = "SELECT activity_id FROM join_activity WHERE user_id = :user_id";
-                    $stmt_joined = $conn->prepare($sql_joined);
-                    $stmt_joined->bindParam(':user_id', $_SESSION['user_id']);
-                    $stmt_joined->execute();
-                    $joined_activities = $stmt_joined->fetchAll(PDO::FETCH_COLUMN);
-
-                    if ($joined_activities === false) {
-                        $joined_activities = [];
-                    }
-
-                    foreach ($activities as $activity) {
-                        echo '<div class="activity">';
-                        echo "<h3 class='activity-title'>" . htmlspecialchars($activity['title']) . "</h3>";
-                        echo "<p class='post-content'>" . htmlspecialchars($activity['content']) . "</p>";
-
-                        // 如果有圖片，顯示圖片
-                        if (!empty($activity['img'])) {
-                            $img_path = htmlspecialchars($activity['img']);
-                            $full_img_url = 'http://localhost' . $img_path;
-                            echo "<img src='" . $full_img_url . "' alt='Activity Image' style='max-width:100%; height:auto;'>";
-                        }
-
-                        echo "<p>活動日期：" . htmlspecialchars($activity['act_date']) . "</p>";
-                        echo "<p>地點：" . htmlspecialchars($activity['place']) . "</p>";
-                        echo "<p>開始時間：" . htmlspecialchars($activity['STARTT']) . "</p>";
-                        echo "<p>結束時間：" . htmlspecialchars($activity['ENDT']) . "</p>";
-                        echo "<p>報名網址：<a href='" . htmlspecialchars($activity['URL']) . "'>" . htmlspecialchars($activity['URL']) . "</a></p>";
-                        echo "<p>午餐內容：" . htmlspecialchars($activity['LUNCH']) . "</p>";
-
-                        // 檢查用戶是否已加入活動
-                        if (in_array($activity['activity_id'], $joined_activities)) {
-                            echo '<button class="add-to-calendar-btn" data-activity-id="' . htmlspecialchars($activity['activity_id']) . '">取消加入此活動</button>';
-                        } else {
-                            echo '<button class="add-to-calendar-btn" data-activity-id="' . htmlspecialchars($activity['activity_id']) . '">加入行事曆</button>';
-                        }
-
-                        echo '</div>';
-                    }
-                } else {
-                    echo "<p>目前沒有最新活動。</p>";
-                }
-                echo '<div class="unlock-premium">';
-                echo '<a href="upgrade.php">解鎖 Premium 會員以觀看更多免費午餐活動</a>';
-                echo '</div>';
-                ?>
-            </div>
-
-            <h2>最新貼文</h2>
-            <div id="articles">
-                <?php
-                // 初始化 $articles 為空數組，避免未定義變量錯誤
-                $articles = [];
-
-                // 獲取最新的貼文及用戶對這些文章的評分狀態
-                $sql = "SELECT A.article_id, A.title, A.content, A.art_date, A.rate, U.username, A.img, A.user_id, V.rate AS user_rate
-                    FROM articles A
-                    JOIN user_account U ON A.user_id = U.user_id
-                    LEFT JOIN Votes V ON A.article_id = V.article_id AND V.user_id = :user_id
-                    ORDER BY A.art_date DESC
-                    LIMIT 5";
-                $stmt = $conn->prepare($sql);
-                $stmt->bindParam(':user_id', $user_id);
-                $stmt->execute();
-                $articles = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                if ($articles) {
-                    foreach ($articles as $article) {
-                        echo "<div class='post'>";
-                        echo "<h3 class='post-title'>" . htmlspecialchars($article['title']) . "</h3>";
-                        echo "<p class='post-content'>" . htmlspecialchars($article['content']) . "</p>";
-                        // 如果有圖片，顯示圖片
-                        if (!empty($article['img'])) {
-                            $img_path = htmlspecialchars($article['img']);
-                            $full_img_url = 'http://localhost' . $img_path;
-                            echo "<img src='" . $full_img_url . "' alt='Article Image' style='max-width:30%; height:auto; object-fit: contain;'>";
-                        }
-                        echo "<p class='post-meta'>由" . htmlspecialchars($article['username']) . " 發佈於" . htmlspecialchars($article['art_date']) . "</p>";
-                        // 顯示評分
-                        echo "<p>評分： " . htmlspecialchars($article['rate']) . "</p>";
-
-                        // 根據用戶對文章的評分狀態調整按鈕
-                        $like_btn_text = $article['user_rate'] == 1 ? "收回讚" : "按讚";
-                        $dislike_btn_text = $article['user_rate'] == -1 ? "收回倒讚" : "倒讚";
-                        $like_rate = $article['user_rate'] == 1 ? 0 : 1;
-                        $dislike_rate = $article['user_rate'] == -1 ? 0 : -1;
-
-                        // 決定按鈕的類別，是否包括活躍狀態
-                        $like_btn_class = $article['user_rate'] == 1 ? "rate-btn like-btn active" : "rate-btn like-btn";
-                        $dislike_btn_class = $article['user_rate'] == -1 ? "rate-btn dislike-btn active" : "rate-btn dislike-btn";
-
-                        // 輸出按讚按鈕
-                        echo '<button class="' . $like_btn_class . '" data-article-id="' . htmlspecialchars($article['article_id']) . '" data-rate="' . $like_rate . '">' . $like_btn_text . '</button>';
-
-                        // 輸出倒讚按鈕
-                        echo '<button class="' . $dislike_btn_class . '" data-article-id="' . htmlspecialchars($article['article_id']) . '" data-rate="' . $dislike_rate . '">' . $dislike_btn_text . '</button>';
-
-                        // 顯示編輯按鈕
-                        if ($article['user_id'] == $user_id) {
-                            echo '<a href="manage_articles.php?article_id=' . htmlspecialchars($article['article_id']) . '" class="edit-btn">編輯文章</a>';
-                        }
-
-                        // 顯示已有的留言
-                        $sql = "SELECT C.content, C.comm_date, U.username
-                            FROM comments C
-                            JOIN user_account U ON C.user_id = U.user_id
-                            WHERE C.article_id = :article_id
-                            ORDER BY C.comm_date DESC";
-                        $stmt = $conn->prepare($sql);
-                        $stmt->bindParam(':article_id', $article['article_id']);
-                        $stmt->execute();
-                        $comments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                        echo '<div class="comments">';
-                        foreach ($comments as $comment) {
-                            echo '<p>' . htmlspecialchars($comment['username']) . ': ' . htmlspecialchars($comment['content']) . ' (' . htmlspecialchars($comment['comm_date']) . ')</p>';
-                        }
-                        echo '</div>';
-
-                        // 顯示留言按鈕
-                        //  echo '<button class="comment-btn" data-article-id="' . htmlspecialchars($article['article_id']) . '">留言</button>';
-                        // 顯示留言輸入框
-                        echo '<form class="comment-form" method="post" action="comments.php">';
-                        echo '<input type="hidden" name="article_id" value="' . htmlspecialchars($article['article_id']) . '">';
-                        echo '<textarea name="content" placeholder="留言……" required></textarea><br>';
-                        echo '<input type="submit" value="Comment" data-article-id="' . htmlspecialchars($article['article_id']) . '">';
-                        echo '</form>';
-
-                        echo '</div>';
-                    }
-                } else {
-                    echo "<p>目前沒有最新貼文。</p>";
-                }
-                // 提示升級premium以解鎖更多文章
-                echo '<div class="unlock-premium">';
-                echo '<a href="upgrade.php>解鎖 Premium 會員以觀看更多文章</p>';
-                echo '</div>';
-                ?>
-            </div>
-
-            <br>
-            <a href="upgrade.php">升級到 Premium 會員</a>
-            <a href="recharge.php">儲值點數</a>
-            <p>目前點數餘額：<?php echo $userBalance; ?> 點</p>
-    </div>
-
-    <script>
-    $(document).ready(function () {
-    $('#calendar').fullCalendar({
-    events: 'load_activities.php',
-    editable: false, 
-    eventLimit: true,
-    header: {
-        left: 'prev,next today',
-        center: 'title',
-        right: 'month,agendaWeek,agendaDay'
-    },
-    selectable: true,
-    dateClick: function(info) {
-        console.log(info)
-        Swal.fire({
-            icon: "success",
-            title: "Clicked",
-            text: info.dateStr,
-            confirmButtonText: "OK",
-        })
-    },
-    select: function(info) {
-        console.log(info)
-        Swal.fire({
-            icon: "success",
-            title: "Selected",
-            text: `${info.startStr} ~ ${info.endStr}`,
-            confirmButtonText: "OK",
-        })
-    },
-    eventClick: function (event) {
-        if (confirm('Are you sure you want to delete this event?')) {
-            $.ajax({
-                url: 'manage_calendar.php',
-                type: 'POST',
-                data: {
-                    action: 'delete',
-                    activity_id: event.id
-                },
-                success: function (response) {
-                    $('#calendar').fullCalendar('removeEvents', event._id);
-                    alert(response);
-                    location.reload();
-                }
-            });
-        }
-    }
-});
-
-
-    // 活動加到行事曆
-    $(document).on('click', '.add-to-calendar-btn', function () {
-        var button = $(this);
-        var activityId = button.data('activity-id');
-        var action = button.text() === '加入行事曆' ? 'add' : 'delete';
-
-        $.ajax({
-            url: 'manage_calendar.php',
-            type: 'POST',
-            data: {
-                action: action,
-                activity_id: activityId
-            },
-            success: function (response) {
-                alert(response);
-                $('#calendar').fullCalendar('refetchEvents'); // 重新載入行事曆
-
-                // 更新button的字
-                if (action === 'add') {
-                    button.text('取消加入此活動');
-                } else {
-                    button.text('加入行事曆');
-                }
-            }
-        });
-    });
-});
-
-        // //顯示留言框
-        // $('.comment-btn').on('click', function () {
-        //         var articleId = $(this).data('article-id');
-        //         $('#modal-article-id').val(articleId);
-        //         $('#comment-modal').show();
-        //     });
-    
-        //     // 關閉留言框
-        //     $('.close').on('click', function () {
-        //         $('#comment-modal').hide();
-        //     });
-    
-        //     // 當點擊留言框外部時關閉
-        //     $(window).on('click', function (event) {
-        //         if (event.target.id === 'comment-modal') {
-        //             $('#comment-modal').hide();
-        //         }
-        //     }); 
-
-        // 處理按讚和倒讚
-        $('.rate-btn').on('click', function () {
-            var articleId = $(this).data('article-id');
-            var rate = $(this).data('rate');
-            $.post('rate.php', { article_id: articleId, rate: rate }, function (response) {
-                location.reload();
-            });
-        });
-    </script>
-    <script src="scriptopen.js"></script>
-
-    <footer>
-        <p>CopyRight © 2024 Great Purpose Team All Rights Reserved</p>
-    </footer>
-</body>
-
-</html>
+<section class="hero">
+<div>
+<span class="eyebrow">YOUR NEXT GOOD THING</span>
+<h1>午餐有著落，<br>
+<em>生活有新發現。</em>
+</h1>
+<p class="hero-copy">嗨，<?= e($user['username']) ?>。從一場講座到一次交流，<br>找到值得出門的理由，也找到一起吃飯的人。</p>
+<a class="button" href="#activities">探索近期活動 ↓</a>
+<p class="hero-count">校園活動 × 社群心得 × 我的行事曆</p>
+</div>
+<div class="hero-art" aria-hidden="true">
+<span class="hero-sticker">Good things are on the menu.</span>
+</div>
+</section>
+<section id="activities">
+<div class="section-heading">
+<div>
+<span class="eyebrow">ON THE MENU</span>
+<h2>近期好活動</h2>
+</div>
+<p>留一個位置給新鮮事。</p>
+</div>
+<form class="filters" method="get">
+<label>找活動或地點<input type="search" name="q" value="<?= e($search) ?>" maxlength="100" placeholder="講座、交流、校園…">
+</label>
+<button class="button" type="submit">搜尋活動 ↗</button>
+</form>
+<div class="activity-grid"><?php foreach ($activities as $activity) activity_card($activity); ?><?php if (!$activities): ?><div class="empty">
+<h3>還沒有符合的活動。</h3>
+<p>換個關鍵字，或稍後再回來看看。</p>
+</div><?php endif; ?></div>
+</section>
+<div class="content-grid">
+<section id="articles">
+<div class="section-heading">
+<div>
+<span class="eyebrow">FROM THE COMMUNITY</span>
+<h2>探索者的餐桌</h2>
+</div>
+<a href="post_article.php">分享心得 ↗</a>
+</div>
+<?php if ($premium): ?><form class="filters" method="get">
+<label>心得排序<select name="sort">
+<option value="recent">最新分享</option>
+<option value="popular"<?= ($_GET['sort'] ?? '') === 'popular' ? ' selected' : '' ?>>最多推薦</option>
+</select>
+</label>
+<button class="button secondary small">更新</button>
+</form><?php endif; ?>
+<?php foreach ($articles as $article): ?><article class="post" id="article-<?= e($article['article_id']) ?>">
+<div class="post-meta">
+<span><?= e($article['username']) ?> 的分享</span>
+<time><?= e($article['art_date']) ?></time>
+</div>
+<h3><?= e($article['title']) ?></h3>
+<p class="post-content"><?= e($article['content']) ?></p><?php if ($image = image_url($article['img'])): ?><img src="<?= e($image) ?>" alt="<?= e($article['title']) ?>的分享圖片" loading="lazy"><?php endif; ?><div class="post-actions">
+<span class="muted"><?= e($article['rate']) ?> 推薦</span><?php foreach ([1 => '有幫助 ↑', -1 => '不推薦 ↓'] as $value => $label): ?><form action="rate.php" method="post"><?= csrf_field() ?><input type="hidden" name="article_id" value="<?= e($article['article_id']) ?>">
+<input type="hidden" name="rate" value="<?= (int) $article['user_rate'] === $value ? 0 : $value ?>">
+<button class="vote" aria-pressed="<?= (int) $article['user_rate'] === $value ? 'true' : 'false' ?>"><?= e($label) ?></button>
+</form><?php endforeach; ?><?php if ((int) $article['user_id'] === $id): ?><a class="text-button" href="manage_articles.php">編輯</a><?php endif; ?></div>
+<div class="comments"><?php foreach ($comments[$article['article_id']] ?? [] as $comment): ?><p class="comment">
+<strong><?= e($comment['username']) ?></strong> · <?= e($comment['content']) ?><br>
+<time><?= e($comment['comm_date']) ?></time>
+</p><?php endforeach; ?><form class="comment-form" method="post" action="comments.php"><?= csrf_field() ?><input type="hidden" name="article_id" value="<?= e($article['article_id']) ?>">
+<label class="full">回應這篇分享<input name="content" maxlength="2000" placeholder="分享你的想法…" required>
+</label>
+<button class="button secondary small">送出</button>
+</form>
+</div>
+</article><?php endforeach; ?>
+<?php if (!$articles): ?><div class="empty">
+<h3>第一篇分享，從你開始。</h3>
+<p>哪個活動值得參加？把你的發現分享給大家。</p>
+<a class="button secondary" href="post_article.php">寫一篇心得</a>
+</div><?php endif; ?><nav class="pagination" aria-label="心得分頁"><?php if ($page > 1): ?><a href="?<?= e(http_build_query(['page'=>$page-1,'sort'=>$_GET['sort'] ?? 'recent'])) ?>#articles">← 上一頁</a><?php endif; ?><span>第 <?= e($page) ?> 頁</span><?php if ($hasNext): ?><a href="?<?= e(http_build_query(['page'=>$page+1,'sort'=>$_GET['sort'] ?? 'recent'])) ?>#articles">下一頁 →</a><?php endif; ?></nav>
+</section>
+<aside class="sidebar">
+<section class="sidebar-card">
+<span class="eyebrow">SAVE YOUR SEAT</span>
+<h3>我的行事曆</h3><?php if ($schedule): ?><ul class="schedule-list"><?php foreach ($schedule as $event): ?><li><?= e($event['title']) ?><span><?= e($event['act_date']) ?> · <?= e($event['start_time']) ?></span>
+</li><?php endforeach; ?></ul><?php else: ?><p>還沒有安排？<br>把喜歡的活動加入行事曆，讓期待成為行程。</p><?php endif; ?></section>
+<section class="sidebar-card">
+<span class="eyebrow">SHARE MORE, DISCOVER MORE</span>
+<h3>每次分享，都有回饋。</h3>
+<ol>
+<li>發表心得，獲得 5 點。</li>
+<li>參與留言，獲得 3 點。</li>
+<li>首次評價每篇心得，獲得 1 點。</li>
+</ol>
+<p>累積 30 點，解鎖 Premium 熱門心得排序。</p>
+<a class="button secondary full" href="wallet.php">查看點數與會員 ↗</a>
+</section>
+</aside>
+</div>
+<?php page_end(); ?>

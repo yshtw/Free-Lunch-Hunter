@@ -1,82 +1,30 @@
 <?php
-// post_article.php
-require 'config.php';
-require 'money.php';
-require 'ArticleClass.php';
-require 'navbar.php';
-
-if (session_status() == PHP_SESSION_NONE) {
-    session_start();
+require_once dirname(__DIR__) . '/app/bootstrap.php';
+$user = require_user();
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $id = save_article((int) $user['user_id'], post_data(), $_FILES['img'] ?? null);
+    flash('分享已發佈，5 點獎勵已加入你的帳戶。');
+    redirect('index.php#article-'.$id);
 }
-
-if (!isset($_SESSION['user_id'])) {
-    header('Location: login.php');
-    exit;
-}
-
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $user_id = $_SESSION['user_id'];
-    $title = $_POST['title'];
-    $content = $_POST['content'];
-
-    // 處理圖片上傳
-    $img = null;
-    if (isset($_FILES['img']) && $_FILES['img']['error'] == UPLOAD_ERR_OK) {
-        $img = $_FILES['img'];
-    }
-
-    $article = new ArticleClass($conn);
-    $result = $article->insertArticle($user_id, $title, $content, $img);
-
-    if ($result) {
-        // 發布貼文成功，獎勵用戶
-        rewardForAction($user_id, 'post', $conn);
-        echo "Post published successfully.";
-    } else {
-        echo "Failed to publish post.";
-    }
-}
+page_start('分享心得', $user);
 ?>
-
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>發佈文章</title>
-    <link rel="stylesheet" href="style_post.css">
-</head>
-
-<body>
-    <div class="wrapper">
-        <div class="container">
-            <header class="fixed-header">
-                <h1>發佈文章</h1>
-            </header>
-            <main>
-                <form method="post" action="post_article.php" enctype="multipart/form-data">
-                    <div class="form-group">
-                        <input type="text" name="title" required placeholder="標題......" oninput="validateForm()">
-                    </div>
-                    <div class="form-group">
-                        <textarea name="content" required placeholder="想說什麼?" oninput="validateForm()"></textarea>
-                    </div>
-                    <div class="form-group">
-                        <label for="image">插入圖片：</label>
-                        <input type="file" name="img" accept="image/*">
-                    </div>
-                    <button name="publishBtn" class="disabled" onclick="publishArticle()" disabled>發佈</button>
-                </form>
-            </main>
-            <div class="preview">
-                <h2>文章預覽</h2>
-                <div class="previewTitle"></div>
-                <div class="previewContent"></div>
-            </div>
-        </div>
-    </div>
-    <script src="script.js"></script>
-</body>
-
-</html>
+<div class="page-title">
+<span class="eyebrow">PASS THE GOOD THINGS ON</span>
+<h1>這次，有什麼新發現？</h1>
+<p>一場值得參加的活動，一份意外好吃的午餐。把你的體驗，變成下一個人的靈感。</p>
+</div>
+<form method="post" enctype="multipart/form-data" class="form-panel stack" data-article-editor><?= csrf_field() ?><label>給分享一個標題<input name="title" maxlength="200" placeholder="例如：在設計講座遇見的午餐驚喜" required>
+</label>
+<label>你的心得<textarea name="content" maxlength="20000" rows="9" required placeholder="聊聊活動內容、交通與午餐，幫助其他人做選擇。">
+</textarea>
+</label>
+<label>附上照片（選填）<input type="file" name="img" accept="image/jpeg,image/png,image/webp">
+<small>JPEG、PNG、WebP，最多 2 MB。</small>
+</label>
+<div class="preview" data-preview aria-live="polite">你的文字預覽會顯示在這裡。</div>
+<div class="form-actions">
+<button class="button">發佈分享 ↗</button>
+<a href="index.php">稍後再寫</a>
+</div>
+</form>
+<?php page_end(); ?>

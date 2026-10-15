@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+/var/
+/test-results/
+final_project/uploads/*
+!final_project/uploads/.gitkeep
+__pycache__/
