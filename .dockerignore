@@ -1,0 +1,5 @@
+.git
+.env*
+var
+test-results
+final_project/uploads/*

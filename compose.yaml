@@ -1,0 +1,40 @@
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_DATABASE: free_lunch_hunter
+      MARIADB_USER: hunter
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/mysql
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  migrate:
+    build: .
+    command: [php, scripts/migrate.php]
+    environment: &app_environment
+      DB_DSN: mysql:host=db;dbname=free_lunch_hunter;charset=utf8mb4
+      DB_USERNAME: hunter
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Taipei}
+      ENABLE_DEMO_TOPUP: ${ENABLE_DEMO_TOPUP:-0}
+    depends_on:
+      db:
+        condition: service_healthy
+  app:
+    build: .
+    environment: *app_environment
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8080"
+    volumes:
+      - uploads:/var/www/final_project/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+volumes:
+  database:
+  uploads:

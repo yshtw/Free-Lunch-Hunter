@@ -1,101 +1,34 @@
 <?php
-require 'config.php';
-session_start();
-
-$error = "";
-$email = "";
-
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $email = $_POST['email'];
-    $password = $_POST['password'];
-
-    try {
-        $sql = "SELECT user_id, password FROM user_account WHERE email = :email";
-        $stmt = $conn->prepare($sql);
-        $stmt->bindParam(':email', $email);
-        $stmt->execute();
-        $stmt->setFetchMode(PDO::FETCH_ASSOC);
-        $user = $stmt->fetch();
-
-        if ($user && password_verify($password, $user['password'])) {
-            $_SESSION['user_id'] = $user['user_id'];
-
-            // 檢查是否為管理員
-            $sql = "SELECT premium FROM premium WHERE user_id = :user_id";
-            $stmt = $conn->prepare($sql);
-            $stmt->bindParam(':user_id', $user['user_id']);
-            $stmt->execute();
-            $stmt->setFetchMode(PDO::FETCH_ASSOC);
-            $premium = $stmt->fetch();
-
-            if ($premium && $premium['premium'] == 2) {
-                // 登入成功後如果是管理員，跳轉到管理員控制台
-                header('Location: admin_dashboard.php');
-            } else {
-                // 否則跳轉到主頁面
-                header('Location: index.php');
-            }
-            exit;
-        } else {
-            $error = "登入失敗，帳號或密碼錯誤。";
-        }
-    } catch (PDOException $e) {
-        $error = '登入失敗：' . $e->getMessage();
-    }
+require_once dirname(__DIR__) . '/app/bootstrap.php';
+if (current_user()) redirect('index.php');
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    login_account(post_data());
+    redirect('index.php');
 }
-
-if ($error) {
-    header('Location: login.php?error=' . urlencode($error) . '&email=' . urlencode($email));
-    exit;
-    }
+page_start('登入');
 ?>
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登入 - 免費午餐分享平台</title>
-    <link rel="stylesheet" href="styles2.css">
-    <script src="https://code.jquery.com/jquery-3.4.1.js" integrity="sha256-WpOohJOqMqqyKL9FccASB9O0KwACQJpFTUBLTYOVvVU=" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@9"></script>
-</head>
-
-<body>
-    <div class="container">
-        <div class="form-container">
-            <h2>登入</h2><br>
-            <form action="login.php" method="post">
-                <div class="input-group">
-                <input type="email" name="email" required value="<?php echo htmlspecialchars(isset($_GET['email']) ? $_GET['email'] : ''); ?>">
-                    <label>Email:</label>
-                </div>
-                <br>
-                <div class="input-group">
-                    <input type="password" name="password" required>
-                    <label>Password:</label>
-                </div>
-                <button type="submit" class="btn login-btn">Login</button>
-                <div class="register-section">
-                    <span>Don't have an account?</span>
-                    <button type="button" class="btn register-btn"
-                        onclick="window.location.href='register.php'">Register ➔</button>
-                </div>
-            </form>
-        </div>
-    </div>
-    <script>
-    $(document).ready(function () {
-        var urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.has('error')) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Oops...',
-                text: decodeURIComponent(urlParams.get('error')),
-            });
-        }
-    });
-    </script>
-</body>
-
-</html>
+<div class="auth-layout">
+<section class="auth-intro">
+<span class="eyebrow">GOOD FOOD, GOOD COMPANY</span>
+<h1>下一頓午餐，<br>多一點<span class="positive">可能。</span>
+</h1>
+<p>找到值得參加的校園活動，分享你的探索心得。<br>一起把好消息，留給需要的人。</p>
+<div class="hero-art" aria-hidden="true">
+<span class="hero-sticker">Lunch is better together.</span>
+</div>
+</section>
+<section class="auth-card">
+<span class="eyebrow">WELCOME BACK</span>
+<h2>歡迎回來。</h2>
+<p class="muted">登入，看看今天有什麼新鮮事。</p>
+<form method="post" class="stack"><?= csrf_field() ?><label>Email<input name="email" type="email" autocomplete="username" maxlength="254" required>
+</label>
+<label>密碼<input name="password" type="password" autocomplete="current-password" maxlength="72" required>
+</label>
+<button class="button full" type="submit">登入帳戶 ↗</button>
+<p class="muted">還沒有帳戶？<a href="register.php">建立免費帳戶</a>
+</p>
+</form>
+</section>
+</div>
+<?php page_end(); ?>

@@ -1,48 +1,17 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>關於我們</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: url('src/img/1718128417.jpg') no-repeat center center fixed;
-            background-size: cover;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            color: #fff;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
-        }
-
-        .container {
-            background: rgba(0, 0, 0, 0.6);
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-            max-width: 600px;
-        }
-
-        h1 {
-            font-size: 36px;
-            margin-bottom: 20px;
-        }
-
-        p {
-            font-size: 18px;
-            line-height: 1.6;
-        }
-    </style>
-</head>
-<body>
-    <?php include 'navbar.php'; ?>
-    <div class="container">
-        <h1>關於我們</h1>
-        <p>乞丐超人致力於提供本校大學生一個公開、免費，能得知高級餐食資訊的平台。隨著企業、補習班進入校內宣傳，他們所帶來的福利也有權利被學生們所享受到，因此造就了現在的乞丐超人</p>
-    </div>
-</body>
-</html>
+<?php
+require_once dirname(__DIR__) . '/app/bootstrap.php';
+page_start('關於我們', current_user());
+?>
+<section class="page-title prose">
+<span class="eyebrow">GOOD THINGS DESERVE TO BE SHARED</span>
+<h1>一頓午餐，<br>可以是很多事情的開始。</h1>
+<p>Free Lunch Hunter 是校園活動與午餐資訊的分享社群。我們希望讓講座、交流與校園福利更容易被發現，讓每個人都有機會參與。</p>
+<h2>發現，參加，再分享。</h2>
+<p>找到喜歡的活動，加入自己的行事曆。參加之後，把真實的心得與實用資訊留下來，幫助下一個探索者做選擇。</p>
+<h2>有用的分享，值得回饋。</h2>
+<p>發表心得獲得 5 點、留言獲得 3 點，每篇心得的首次評價可獲得 1 點。累積 30 點即可一次升級 Premium，解鎖熱門心得排序。點數為社群回饋，不具有現金價值。</p>
+<h2>讓社群維持好用，也好相處。</h2>
+<p>請分享真實經驗，尊重不同的觀點，避免張貼個人隱私與未經授權的內容。活動詳情與報名資格，請以主辦單位公告為準。</p>
+<a class="button" href="index.php">一起探索 ↗</a>
+</section>
+<?php page_end(); ?>
