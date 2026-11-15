@@ -91,9 +91,7 @@ The command returns JSON and exits **0** for clean data, **1** for detected inco
 - [Architecture and tradeoffs](docs/architecture.md)
 - [OpenAPI contract](docs/openapi.yaml)
 - [Reconciliation and operations](docs/operations.md)
-- [Five-minute interview walkthrough and role alignment](docs/portfolio.md)
-- [AI-assisted development and verification](docs/ai-development.md)
 
 The frontend and API share the same service functions. `app/bootstrap.php` owns HTTP/session boundaries; `app/services.php` owns domain transactions; `app/view.php` contains shared presentation helpers. `final_project/` is the only intended web document root. The original `/final_project/*.php` URLs also work when serving the checkout root for local development, but exposing the full checkout is not the container's configuration.
 
-This project originated as a campus course-team application; the original repository credits Great Purpose Team. This revision keeps its event/community concept while replacing duplicated page logic with shared services and adding testable commerce behavior. It does not claim production traffic, payment-provider integration, or measured business impact.
+This project began as a team-built campus event app. This revision keeps its event/community concept while replacing duplicated page logic with shared services and adding testable commerce behavior. It does not claim production traffic, payment-provider integration, or measured business impact.
