@@ -90,6 +90,34 @@ class Browser:
         return self.request('post_article.php', raw=b''.join(parts), headers={'Content-Type':f'multipart/form-data; boundary={boundary}'})
 
 
+def issue_token(email, scopes='read', days='30'):
+    result = subprocess.run([PHP, 'scripts/token.php', 'issue', email, f'--scopes={scopes}', f'--days={days}',
+        '--label=integration'], cwd=ROOT, env=ENV, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+class TokenClient:
+    """Bearer-token client with no cookie jar: proves token requests never depend on a session."""
+
+    def __init__(self, base, token):
+        self.base = base
+        self.token = token
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def call(self, method, resource, body=None, *, params=None, headers=None):
+        query = urllib.parse.urlencode({'resource': resource, **(params or {})})
+        request = urllib.request.Request(f'{self.base}api.php?{query}', method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={'Authorization': f'Bearer {self.token}', 'Content-Type': 'application/json', **(headers or {})})
+        try:
+            response = self.opener.open(request, timeout=20)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            return response.status, json.loads(response.read().decode() or 'null'), dict(response.headers)
+
+
 class BackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -115,7 +143,7 @@ class BackendTests(unittest.TestCase):
             cls.stop_server()
             raise RuntimeError('PHP server did not become ready')
         cls.accounts = {}
-        for role in ['user', 'other', 'admin', 'buyer', 'racer', 'poor', 'auditor']:
+        for role in ['user', 'other', 'admin', 'buyer', 'racer', 'poor', 'auditor', 'agent']:
             account = {'email':f'{MARKER}_{role}@example.invalid', 'username':f'{MARKER}_{role}',
                 'password':secrets.token_urlsafe(24), 'birth_date':'2000-01-01'}
             browser = Browser(cls.base)
@@ -494,6 +522,156 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn('/nonexistent', result.stderr)
         self.assertEqual(self.reconcile()[0].returncode, 0)
 
+
+    def upcoming_activity(self, title_suffix, days=7, start='12:00', end='13:00', content='Token test event'):
+        from datetime import date, timedelta
+        admin, browser = self.account('admin')
+        title = f'{MARKER}_{title_suffix}'
+        self.assertEqual(browser.post('create_activities.php', {'title':title, 'content':content, 'place':'Taipei',
+            'act_date':str(date.today()+timedelta(days=days)), 'start_time':start, 'end_time':end})[0], 200)
+        return int(scalar('SELECT activity_id FROM activities WHERE user_id=? AND title=?', [admin['id'], title]))
+
+    def test_22_migration_v2_and_tokens_store_only_digests(self):
+        self.assertEqual([row['version'] for row in sql('SELECT version FROM schema_migrations ORDER BY version')], [1, 2])
+        account = self.account('user')[0]
+        issued = issue_token(account['email'], 'schedule:write')
+        self.assertRegex(issued['token'], r'\Aflh_[a-f0-9]{16}_[a-f0-9]{64}\Z')
+        self.assertEqual(issued['scopes'], ['read', 'schedule:write'])
+        secret = issued['token'].rsplit('_', 1)[1]
+        stored = sql('SELECT secret_hash,scopes FROM api_tokens WHERE token_id=?', [issued['token_id']])[0]
+        self.assertNotIn(secret, json.dumps(stored))
+        self.assertEqual(len(stored['secret_hash']), 64)
+        for arguments in [['issue', account['email'], '--scopes=admin'], ['issue', account['email'], '--days=0'],
+                ['issue', account['email'], '--days=366'], ['issue', account['email'], '--bogus=1'], ['launch']]:
+            result = subprocess.run([PHP, 'scripts/token.php', *arguments], cwd=ROOT, env=ENV,
+                text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 2, arguments)
+            self.assertEqual(result.stdout, '')
+        listed = subprocess.run([PHP, 'scripts/token.php', 'list', account['email']], cwd=ROOT, env=ENV,
+            text=True, capture_output=True, timeout=20, check=True).stdout
+        self.assertIn(issued['token_id'], listed)
+        self.assertNotIn(secret, listed)
+
+    def test_23_read_token_cannot_write_and_uses_no_session(self):
+        account = self.account('user')[0]
+        client = TokenClient(self.base, issue_token(account['email'])['token'])
+        status, body, headers = client.call('GET', 'session')
+        self.assertEqual(status, 200)
+        self.assertEqual((body['auth'], body['scopes'], body['user']['user_id']), ('token', ['read'], account['id']))
+        self.assertNotIn('csrf_token', body)
+        self.assertNotIn('flh_session', headers.get('Set-Cookie', ''))
+        for resource in ['wallet', 'membership-offer', 'membership-orders', 'activities', 'schedule']:
+            self.assertEqual(client.call('GET', resource)[0], 200, resource)
+        activity = self.upcoming_activity('read_only')
+        before = self.balance()
+        self.assertEqual(client.call('POST', 'schedule', {'activity_id':activity, 'action':'add'})[0], 403)
+        self.assertEqual(client.call('POST', 'membership-orders', {'product_code':'premium_lifetime'},
+            headers={'Idempotency-Key':uuid.uuid4().hex})[0], 403)
+        self.assertEqual(self.balance(), before)
+        self.assertEqual(int(scalar('SELECT COUNT(*) FROM join_activity WHERE user_id=? AND activity_id=?',
+            [account['id'], activity])), 0)
+        self.assertEqual(client.call('DELETE', 'schedule')[0], 405)
+        self.assertEqual(client.call('GET', 'nonexistent')[0], 404)
+
+    def test_24_invalid_revoked_and_expired_tokens_never_fall_back_to_session(self):
+        account, browser = self.account('user')
+        issued = issue_token(account['email'])
+        token_id, secret = issued['token_id'], issued['token'].rsplit('_', 1)[1]
+        for token in ['', 'flh_short', f'flh_{token_id}_{"0" * 64}', f'flh_{"f" * 16}_{secret}', issued['token'] + 'x']:
+            self.assertEqual(TokenClient(self.base, token).call('GET', 'wallet')[0], 401, token)
+        # A browser session cookie plus a bad Authorization header must not authenticate as the cookie owner.
+        self.assertEqual(browser.request('api.php?resource=wallet', headers={'Authorization':'Bearer invalid'})[0], 401)
+        self.assertEqual(browser.request('api.php?resource=wallet', headers={'Authorization':'Basic dXNlcjpwYXNz'})[0], 401)
+        self.assertEqual(browser.request('api.php?resource=wallet')[0], 200)
+        client = TokenClient(self.base, issued['token'])
+        self.assertEqual(client.call('GET', 'wallet')[0], 200)
+        self.assertIsNotNone(scalar('SELECT last_used_at FROM api_tokens WHERE token_id=?', [token_id]))
+        revoke = subprocess.run([PHP, 'scripts/token.php', 'revoke', token_id], cwd=ROOT, env=ENV, capture_output=True, timeout=20)
+        self.assertEqual(revoke.returncode, 0)
+        self.assertEqual(client.call('GET', 'wallet')[0], 401)
+        expired = issue_token(account['email'])
+        sql('UPDATE api_tokens SET expires_at=NOW() - INTERVAL 1 SECOND WHERE token_id=?', [expired['token_id']])
+        self.assertEqual(TokenClient(self.base, expired['token']).call('GET', 'wallet')[0], 401)
+        sql('DELETE FROM api_tokens WHERE user_id=?', [account['id']])
+
+    def test_25_scoped_writes_need_no_csrf_and_are_retry_safe(self):
+        account = self.account('agent')[0]
+        writer = TokenClient(self.base, issue_token(account['email'], 'schedule:write,membership:redeem')['token'])
+        activity = self.upcoming_activity('token_write')
+        for _ in range(2):
+            self.assertEqual(writer.call('POST', 'schedule', {'activity_id':activity, 'action':'add'})[:2],
+                (200, {'activity_id':activity, 'joined':True}))
+        self.assertEqual([item['activity_id'] for item in writer.call('GET', 'schedule')[1]['activities']], [activity])
+        self.assertEqual(writer.call('POST', 'schedule', {'activity_id':activity, 'action':'join'})[0], 422)
+        self.assertEqual(writer.call('POST', 'schedule', {'activity_id':2147483647, 'action':'add'})[0], 404)
+        for _ in range(2):
+            self.assertEqual(writer.call('POST', 'schedule', {'activity_id':activity, 'action':'remove'})[0], 200)
+        self.assertEqual(writer.call('GET', 'schedule')[1]['activities'], [])
+        # Session-authenticated writes still require CSRF even when the same endpoint accepts tokens.
+        _, browser = self.account('agent')
+        self.assertEqual(browser.request('api.php?resource=schedule', raw=json.dumps({'activity_id':activity,
+            'action':'add'}).encode(), headers={'Content-Type':'application/json'})[0], 403)
+        offer = writer.call('GET', 'membership-offer')[1]
+        balance = Decimal(offer['balance'])
+        self.assertLess(balance, 30)
+        self.assertEqual((offer['membership_level'], offer['eligible'], offer['reason'], offer['points_needed']),
+            ('regular', False, 'insufficient_points', f'{30 - balance:.2f}'))
+        self.assertEqual(writer.call('POST', 'membership-orders', {'product_code':'premium_lifetime'},
+            headers={'Idempotency-Key':uuid.uuid4().hex})[0], 409)
+        self.assertEqual(self.credit('agent', int(35 - balance))[0], 200)
+        self.assertEqual(writer.call('GET', 'membership-offer')[1]['eligible'], True)
+        key = uuid.uuid4().hex
+        first = writer.call('POST', 'membership-orders', {'product_code':'premium_lifetime'}, headers={'Idempotency-Key':key})
+        again = writer.call('POST', 'membership-orders', {'product_code':'premium_lifetime'}, headers={'Idempotency-Key':key})
+        self.assertEqual((first[0], again[0], again[2]['Idempotency-Replayed']), (201, 200, 'true'))
+        self.assertEqual(first[1]['order'], again[1]['order'])
+        self.assertEqual(self.balance('agent'), 5)
+        self.assertEqual(writer.call('GET', 'membership-offer')[1]['reason'], 'already_member')
+        self.reconcile_clean('agent')
+
+    def reconcile_clean(self, role):
+        result, report = self.reconcile(role)
+        self.assertEqual(result.returncode, 0, report)
+
+    def test_26_activity_search_filters_literal_wildcards_and_flags_joined(self):
+        account = self.account('other')[0]
+        client = TokenClient(self.base, issue_token(account['email'], 'schedule:write')['token'])
+        near = self.upcoming_activity('search_near', days=3, content='Robotics 100% hands-on')
+        far = self.upcoming_activity('search_far', days=20)
+        sql('INSERT INTO activities(title,content,act_date,place,startt,endt,user_id) VALUES(?,?,CURDATE() - INTERVAL 1 DAY,?,?,?,?)',
+            [MARKER + '_search_past', 'past', 'Taipei', '12:00:00', '13:00:00', self.account('admin')[0]['id']])
+        client.call('POST', 'schedule', {'activity_id':near, 'action':'add'})
+        found = client.call('GET', 'activities', params={'q':MARKER + '_search'})[1]
+        self.assertEqual([item['activity_id'] for item in found['activities']], [near, far])
+        self.assertEqual([item['joined'] for item in found['activities']], [True, False])
+        self.assertEqual(set(found['activities'][0]), {'activity_id', 'title', 'content', 'act_date', 'start_time',
+            'end_time', 'place', 'lunch', 'url', 'joined'})
+        self.assertFalse(found['has_more'])
+        from datetime import date, timedelta
+        window = client.call('GET', 'activities', params={'q':MARKER + '_search', 'to':str(date.today()+timedelta(days=10))})[1]
+        self.assertEqual([item['activity_id'] for item in window['activities']], [near])
+        limited = client.call('GET', 'activities', params={'q':MARKER + '_search', 'limit':'1'})[1]
+        self.assertTrue(limited['has_more'])
+        self.assertEqual([item['activity_id'] for item in client.call('GET', 'activities', params={'q':'100%'})[1]['activities']], [near])
+        self.assertEqual(client.call('GET', 'activities', params={'q':MARKER[:5] + '%_search'})[1]['activities'], [])
+        self.assertEqual([item['activity_id'] for item in client.call('GET', 'activities', params={'activity_id':far})[1]['activities']], [far])
+        past = int(scalar('SELECT activity_id FROM activities WHERE title=?', [MARKER + '_search_past']))
+        self.assertEqual(client.call('GET', 'activities', params={'activity_id':past})[1]['activities'], [])
+        for params in [{'activity_id':'0'}, {'from':'2026-02-30'}, {'limit':'0'}, {'limit':'51'}, {'from':'2099-01-02', 'to':'2099-01-01'}]:
+            self.assertEqual(client.call('GET', 'activities', params=params)[0], 422, params)
+
+    def test_27_membership_offer_is_server_computed(self):
+        account = self.account('poor')[0]
+        client = TokenClient(self.base, issue_token(account['email'])['token'])
+        offer = client.call('GET', 'membership-offer')[1]
+        balance = Decimal(offer['balance'])
+        self.assertEqual((offer['product_code'], offer['price'], offer['unit']), ('premium_lifetime', '30.00', 'community_points'))
+        if offer['membership_level'] == 'regular' and balance < 30:
+            self.assertEqual((offer['eligible'], offer['reason']), (False, 'insufficient_points'))
+            self.assertEqual(Decimal(offer['points_needed']), 30 - balance)
+            self.assertEqual(self.credit('poor', int(30 - balance))[0], 200)
+            offer = client.call('GET', 'membership-offer')[1]
+        self.assertEqual((offer['eligible'], offer['reason'], Decimal(offer['points_needed'])), (True, None, 0))
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

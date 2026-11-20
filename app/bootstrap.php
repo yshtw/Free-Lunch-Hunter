@@ -93,7 +93,8 @@ function csrf_field(): string
     return '<input type="hidden" name="csrf_token" value="' . e(csrf_token()) . '">';
 }
 
-function post_data(): array
+/** Parses a POST body without CSRF verification. Only bearer-token API requests may use it directly. */
+function request_body(): array
 {
     if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
         header('Allow: POST');
@@ -110,6 +111,12 @@ function post_data(): array
             throw new HttpError(400, '請提供 JSON 物件。');
         }
     }
+    return $data;
+}
+
+function post_data(): array
+{
+    $data = request_body();
     $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($data['csrf_token'] ?? '');
     if (!is_string($token) || !hash_equals(csrf_token(), $token)) {
         throw new HttpError(403, '驗證已失效，請重新載入頁面。');
@@ -182,7 +189,14 @@ function safe_url(?string $url): string
 }
 
 require_once __DIR__ . '/services.php';
+require_once __DIR__ . '/tokens.php';
 require_once __DIR__ . '/view.php';
+
+/** True for API requests that carry an Authorization header; these never use the session cookie. */
+function token_request(): bool
+{
+    return PHP_SAPI !== 'cli' && basename($_SERVER['SCRIPT_NAME'] ?? '') === 'api.php' && authorization_header() !== null;
+}
 
 if (PHP_SAPI !== 'cli') {
     $requestId = bin2hex(random_bytes(8));
@@ -195,7 +209,9 @@ if (PHP_SAPI !== 'cli') {
     session_name('flh_session');
     session_set_cookie_params(['httponly' => true, 'samesite' => 'Lax',
         'secure' => ($_SERVER['HTTPS'] ?? '') === 'on']);
-    session_start();
+    if (!token_request()) {
+        session_start();
+    }
     set_exception_handler(function (Throwable $error) use ($requestId): void {
         $status = $error instanceof HttpError ? $error->status : 500;
         $message = $error instanceof HttpError ? $error->getMessage() : '服務暫時無法完成操作，請稍後重試。';

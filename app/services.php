@@ -1,6 +1,9 @@
 <?php
 declare(strict_types=1);
 
+const PREMIUM_PRODUCT = 'premium_lifetime';
+const PREMIUM_PRICE = 30;
+
 function register_account(array $data): void
 {
     $email = strtolower(text($data, 'email', 254));
@@ -92,7 +95,7 @@ function membership_order(int $userId, string $key, string $product): array
     if (!preg_match('/\A[A-Za-z0-9_-]{16,80}\z/', $key)) {
         throw new HttpError(422, '請提供 16–80 字元的 Idempotency-Key。');
     }
-    if ($product !== 'premium_lifetime') {
+    if ($product !== PREMIUM_PRODUCT) {
         throw new HttpError(422, '會員方案不存在。');
     }
     return transaction(function () use ($userId, $key, $product): array {
@@ -108,17 +111,93 @@ function membership_order(int $userId, string $key, string $product): array
         if ((int) $wallet['premium'] !== 0) {
             throw new HttpError(409, '目前會員等級無需再次升級。');
         }
-        if ((float) $wallet['money'] < 30) {
-            throw new HttpError(409, '點數不足，升級需要 30 點。');
+        if ((float) $wallet['money'] < PREMIUM_PRICE) {
+            throw new HttpError(409, '點數不足，升級需要 ' . PREMIUM_PRICE . ' 點。');
         }
         $id = bin2hex(random_bytes(16));
         query('INSERT INTO membership_orders(order_id,user_id,product_code,amount,status,idempotency_key)
-            VALUES(?,?,?,30,\'completed\',?)', [$id, $userId, $product, $key]);
-        wallet_entry($userId, -30, 'membership', $id);
+            VALUES(?,?,?,?,\'completed\',?)', [$id, $userId, $product, PREMIUM_PRICE, $key]);
+        wallet_entry($userId, -PREMIUM_PRICE, 'membership', $id);
         query('UPDATE premium SET premium=1 WHERE user_id=?', [$userId]);
         return ['order' => query('SELECT order_id,product_code,amount,status,created_at FROM membership_orders
             WHERE order_id=?', [$id])->fetch(), 'replayed' => false];
     });
+}
+
+/**
+ * Server-side eligibility for the one membership product. Clients (including LLM agents) display this
+ * decision instead of re-deriving prices or balance arithmetic themselves.
+ */
+function membership_offer(int $userId): array
+{
+    $wallet = query('SELECT premium,money,CAST(GREATEST(0, ? - money) AS DECIMAL(12,2)) AS points_needed FROM premium WHERE user_id=?',
+        [PREMIUM_PRICE, $userId])->fetch();
+    if (!$wallet) {
+        throw new HttpError(404, '會員帳戶不存在。');
+    }
+    $reason = match (true) {
+        (int) $wallet['premium'] !== 0 => 'already_member',
+        (float) $wallet['points_needed'] > 0 => 'insufficient_points',
+        default => null,
+    };
+    return ['product_code' => PREMIUM_PRODUCT, 'price' => number_format(PREMIUM_PRICE, 2, '.', ''),
+        'unit' => 'community_points', 'balance' => $wallet['money'],
+        'membership_level' => ['regular', 'premium', 'admin'][(int) $wallet['premium']],
+        'eligible' => $reason === null, 'reason' => $reason, 'points_needed' => $wallet['points_needed']];
+}
+
+const ACTIVITY_COLUMNS = 'a.activity_id,a.title,a.content,a.act_date,TIME_FORMAT(a.startt,\'%H:%i\') AS start_time,
+    TIME_FORMAT(a.endt,\'%H:%i\') AS end_time,a.place,a.lunch,a.url';
+
+function optional_date(array $data, string $key): ?string
+{
+    $value = text($data, $key, 10, false);
+    if ($value === '') {
+        return null;
+    }
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+    if (!$date || $date->format('Y-m-d') !== $value) {
+        throw new HttpError(422, '日期格式需為 YYYY-MM-DD：' . $key);
+    }
+    return $value;
+}
+
+function activity_row(array $row): array
+{
+    $row['activity_id'] = (int) $row['activity_id'];
+    $row['joined'] = (bool) $row['joined'];
+    $row['url'] = safe_url($row['url']) ?: null;
+    return $row;
+}
+
+/** Upcoming activities only. Search matches title, place, or description; LIKE wildcards are literal.
+ * An optional activity_id narrows the result to that one upcoming activity. */
+function search_activities(int $userId, array $filters): array
+{
+    $search = text($filters, 'q', 100, false);
+    $from = max(optional_date($filters, 'from') ?? date('Y-m-d'), date('Y-m-d'));
+    $to = optional_date($filters, 'to');
+    $limit = filter_var($filters['limit'] ?? 20, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 50]]);
+    if ($limit === false || ($to !== null && $to < $from)) {
+        throw new HttpError(422, 'limit 需為 1–50，且結束日期不可早於開始日期。');
+    }
+    $only = isset($filters['activity_id']) ? positive_id($filters['activity_id']) : null;
+    $pattern = '%' . addcslashes($search, '%_\\') . '%';
+    $rows = query('SELECT ' . ACTIVITY_COLUMNS . ',
+        EXISTS(SELECT 1 FROM join_activity j WHERE j.activity_id=a.activity_id AND j.user_id=?) AS joined
+        FROM activities a WHERE a.act_date>=? AND (? IS NULL OR a.act_date<=?) AND (? IS NULL OR a.activity_id=?)
+        AND (a.title LIKE ? OR a.place LIKE ? OR a.content LIKE ?)
+        ORDER BY a.act_date,a.startt,a.activity_id LIMIT ' . ($limit + 1),
+        [$userId, $from, $to, $to, $only, $only, $pattern, $pattern, $pattern])->fetchAll();
+    return ['activities' => array_map('activity_row', array_slice($rows, 0, $limit)), 'has_more' => count($rows) > $limit];
+}
+
+function upcoming_schedule(int $userId): array
+{
+    $rows = query('SELECT ' . ACTIVITY_COLUMNS . ',1 AS joined FROM activities a
+        JOIN join_activity j ON j.activity_id=a.activity_id
+        WHERE j.user_id=? AND a.act_date>=CURDATE() ORDER BY a.act_date,a.startt,a.activity_id LIMIT 100', [$userId])->fetchAll();
+    return array_map('activity_row', $rows);
 }
 
 function sandbox_credit(int $userId, array $data): void

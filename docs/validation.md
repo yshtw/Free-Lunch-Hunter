@@ -2,6 +2,23 @@
 
 Validated on 2026-10-16 (Asia/Taipei). This record describes local checks; hosted CI results are reported separately on the pull request. No hosted deployment is claimed.
 
+## API tokens and MCP server
+
+Validated locally on 2026-11-20 (Asia/Taipei). Hosted CI results are reported on the pull request.
+
+| Check | Observed result |
+| --- | --- |
+| PHP syntax | All 31 PHP files passed (`scripts/lint.sh`, which now also compiles `tests/integration.py`) |
+| Real HTTP + MariaDB regression suite | All 27 tests passed in 13.2 seconds (21 existing, 6 new for tokens, scopes, search, schedule, and offer) |
+| MCP server unit + protocol + stdio end-to-end | 52 passed in 3.6 seconds; without `DB_DSN`, 49 passed and the 3 end-to-end tests skipped |
+| MCP lint | `ruff check` and `ruff format --check` passed; `uv lock --check` passed |
+| Diff whitespace | `git diff --check` passed |
+| Local runtime | macOS, PHP 8.5.12, MariaDB 13.0.2 (`lower_case_table_names=2`, the macOS default), Python 3.12, `mcp` 2.3.0 |
+
+This run used newer PHP and MariaDB versions than the project targets (PHP 8.4, MariaDB 11.8), and macOS case-folding rather than the case-sensitive Linux default. The CI workflow runs the same suites on PHP 8.4 and MariaDB 11.8 with `lower_case_table_names=0`. The local MariaDB instance used a temporary data directory and was removed afterwards. Docker builds and browser screenshots were not repeated, because this change adds no UI.
+
+The end-to-end tests start `python -m flh_mcp` as a real stdio subprocess against the PHP built-in server. They cover: overlap refusal and conflict-aware search, preview and redeem with a same-code retry (one order, one debit, clean reconciliation for that account), a read-only token that receives planted prompt-injection text but has no spending tool, and a revoked token that stops startup without echoing the token. These tests check server behavior. They do not measure how well an LLM chooses tools; no model was in the loop.
+
 ## Wallet operations follow-up
 
 | Check | Observed result |

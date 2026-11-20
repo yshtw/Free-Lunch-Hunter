@@ -1,0 +1,39 @@
+[project]
+name = "flh-mcp"
+version = "0.1.0"
+description = "MCP server that exposes Free Lunch Hunter events, schedule, and points wallet to AI agents through scoped API tokens."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28,<1",
+    "mcp>=2.3,<3",
+]
+
+[project.scripts]
+flh-mcp = "flh_mcp.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+    "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["e2e: needs PHP, an isolated *_test MariaDB database, and DB_DSN credentials"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
+ignore = ["E501"]  # the formatter owns line length; long strings stay readable

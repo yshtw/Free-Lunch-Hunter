@@ -1,18 +1,23 @@
 openapi: 3.1.0
 info:
   title: Free Lunch Hunter API
-  version: 1.0.0
+  version: 1.1.0
   description: >-
     Same-origin, session-authenticated community points API. Points are not money.
     Paths are relative to the PHP document root. Register and log in through the
     HTML forms, retaining cookies, then request resource=session for a CSRF token.
-    This is not yet a partner API or payment-provider integration.
+    Non-browser clients (such as the MCP server) instead send a scoped personal
+    token issued by scripts/token.php as `Authorization: Bearer flh_…`. Token
+    requests use no session and no CSRF token; each route requires a scope
+    (read, schedule:write, membership:redeem). An invalid token is 401 and never
+    falls back to a session cookie. This is not yet a partner API or
+    payment-provider integration.
 servers:
   - url: http://localhost:8080
 paths:
   /api.php:
     get:
-      summary: Read health, session, wallet, or membership orders
+      summary: Read health, session, wallet, membership offer or orders, activities, or schedule
       description: >-
         Only resource=health is public. Other resources require the flh_session
         cookie and return only the authenticated account's data. Wallet history
@@ -20,8 +25,10 @@ paths:
         Wallet balance and entries come from the same committed snapshot. The
         sum of the returned 50 entries need not equal the lifetime balance.
         Health performs a real database query and returns 500 if it fails.
+        Token callers need the read scope. Activities lists upcoming events only.
       security:
         - sessionCookie: []
+        - bearerToken: [read]
         - {}
       parameters:
         - name: resource
@@ -29,7 +36,27 @@ paths:
           required: true
           schema:
             type: string
-            enum: [health, session, wallet, membership-orders]
+            enum: [health, session, wallet, membership-offer, membership-orders, activities, schedule]
+        - name: q
+          in: query
+          description: activities only. Matches title, place, or description; % and _ are literal.
+          schema: {type: string, maxLength: 100}
+        - name: from
+          in: query
+          description: activities only. Earliest date (YYYY-MM-DD); earlier values are raised to today.
+          schema: {type: string, format: date}
+        - name: to
+          in: query
+          description: activities only. Latest date, inclusive; must not precede from.
+          schema: {type: string, format: date}
+        - name: activity_id
+          in: query
+          description: activities only. Restrict to one upcoming activity.
+          schema: {type: integer, minimum: 1}
+        - name: limit
+          in: query
+          description: activities only.
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
       responses:
         '200':
           description: The selected resource
@@ -45,12 +72,16 @@ paths:
                     properties:
                       status: {const: ok}
                   - type: object
-                    required: [user, csrf_token]
+                    required: [user, scopes, auth]
                     properties:
                       user:
                         type: object
                         description: Account ID, username, email, membership level, and balance; no password.
-                      csrf_token: {type: string}
+                      scopes:
+                        type: array
+                        items: {enum: [membership:redeem, read, schedule:write]}
+                      auth: {enum: [session, token]}
+                      csrf_token: {type: string, description: Session callers only.}
                   - type: object
                     required: [balance, unit, entries]
                     properties:
@@ -72,12 +103,32 @@ paths:
                       orders:
                         type: array
                         items: {$ref: '#/components/schemas/Order'}
+                  - {$ref: '#/components/schemas/MembershipOffer'}
+                  - type: object
+                    required: [activities, has_more]
+                    properties:
+                      activities:
+                        type: array
+                        items: {$ref: '#/components/schemas/Activity'}
+                      has_more: {type: boolean}
+                  - type: object
+                    required: [activities]
+                    description: schedule. Upcoming saved activities, soonest first, at most 100.
+                    properties:
+                      activities:
+                        type: array
+                        items: {$ref: '#/components/schemas/Activity'}
         '401': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '500': {$ref: '#/components/responses/Error'}
     post:
-      summary: Redeem 30 community points for Premium
+      summary: Redeem 30 community points for Premium, or change the schedule
       description: >-
+        resource=schedule (scope schedule:write) takes {activity_id, action: add|remove}
+        and returns {activity_id, joined}. It is a desired-state update; repeating
+        it is a no-op. Adding an ended or unknown activity returns 404.
+        resource=membership-orders (scope membership:redeem) is described below.
+        Session callers send X-CSRF-Token; token callers do not.
         The product and price are server-controlled. On the first valid request,
         order creation, ledger debit, balance update, and entitlement activation
         commit together. Retrying the same account-scoped key returns its original
@@ -86,14 +137,17 @@ paths:
       security:
         - sessionCookie: []
           csrfToken: []
+        - bearerToken: [membership:redeem]
+        - bearerToken: [schedule:write]
       parameters:
         - name: resource
           in: query
           required: true
-          schema: {const: membership-orders}
+          schema: {enum: [membership-orders, schedule]}
         - name: Idempotency-Key
           in: header
-          required: true
+          required: false
+          description: Required for membership-orders.
           schema:
             type: string
             pattern: '^[A-Za-z0-9_-]{16,80}$'
@@ -103,10 +157,16 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [product_code]
-              properties:
-                product_code: {const: premium_lifetime}
+              oneOf:
+                - type: object
+                  required: [product_code]
+                  properties:
+                    product_code: {const: premium_lifetime}
+                - type: object
+                  required: [activity_id, action]
+                  properties:
+                    activity_id: {type: integer, minimum: 1}
+                    action: {enum: [add, remove]}
       responses:
         '201':
           description: New completed order
@@ -140,6 +200,11 @@ components:
       type: apiKey
       in: header
       name: X-CSRF-Token
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: flh_<16 hex id>_<64 hex secret>
+      description: Personal token from scripts/token.php. Scopes are read, schedule:write, membership:redeem.
   schemas:
     Order:
       type: object
@@ -150,6 +215,32 @@ components:
         amount: {type: string, example: '30.00'}
         status: {const: completed}
         created_at: {type: string, description: 'Local database DATETIME, YYYY-MM-DD HH:MM:SS'}
+    MembershipOffer:
+      type: object
+      required: [product_code, price, unit, balance, membership_level, eligible, reason, points_needed]
+      properties:
+        product_code: {const: premium_lifetime}
+        price: {type: string, example: '30.00'}
+        unit: {const: community_points}
+        balance: {type: string, example: '12.00'}
+        membership_level: {enum: [regular, premium, admin]}
+        eligible: {type: boolean}
+        reason: {enum: [already_member, insufficient_points, null]}
+        points_needed: {type: string, example: '18.00'}
+    Activity:
+      type: object
+      required: [activity_id, title, content, act_date, start_time, end_time, place, lunch, url, joined]
+      properties:
+        activity_id: {type: integer}
+        title: {type: string}
+        content: {type: string}
+        act_date: {type: string, format: date}
+        start_time: {type: string, example: '12:00'}
+        end_time: {type: string, example: '13:00'}
+        place: {type: string}
+        lunch: {type: [string, 'null']}
+        url: {type: [string, 'null'], description: Validated HTTP(S) link or null.}
+        joined: {type: boolean, description: Whether the caller saved it to their schedule.}
     OrderResult:
       type: object
       required: [order, replayed]

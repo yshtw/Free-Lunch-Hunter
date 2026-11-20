@@ -58,9 +58,21 @@ Scheduling the command and routing alerts are deployment responsibilities. A pro
 
 The application still needs login throttling, password recovery, moderation, upload lifecycle cleanup, monitoring, and operational hardening before public production use. The PHP built-in server is a reproducible development/demo server; use a maintained PHP-FPM/reverse-proxy setup with HTTPS for deployment.
 
+## API tokens and agent access
+
+AI agents use the API through personal tokens, not browser sessions. `scripts/token.php` issues `flh_<id>_<secret>` for an existing account with an explicit scope list (`read`, `schedule:write`, `membership:redeem`), a label, and a 1–365-day lifetime. Only a SHA-256 digest of the 256-bit random secret is stored, and the plaintext is printed once. Revocation and expiry take effect on the next request. `last_used_at` is updated at most once a minute, so frequent agent calls do not cause a write per request.
+
+- `api.php` accepts a bearer token only on API routes. A request that carries an `Authorization` header never starts or reads a PHP session. An invalid token is a `401`; it does not fall back to a cookie that happens to be present.
+- Every route declares its scope. Reads need `read`, schedule changes need `schedule:write`, and orders need `membership:redeem`. Browser sessions keep every capability, as before.
+- Token writes skip CSRF verification because the browser never attaches a bearer token automatically. Cookie-authenticated writes to the same routes still require the CSRF token.
+- `membership-offer` returns the server's eligibility decision and exact `points_needed`, so clients display a decision instead of re-deriving the price rule. The price is one constant, shared with order creation.
+- `activities` searches upcoming events with literal `%`/`_` matching, a date window, an optional `activity_id`, and `has_more` paging; it reports whether the caller saved each one. `schedule` changes are desired-state and safe to retry.
+
+The [MCP server](../mcp_server/README.md) builds intent-level tools on these routes and exposes only the tools a token's scopes permit. Hiding tools is a usability measure; the scope checks above are the security boundary. Token issuance is deliberately CLI-only for now. A self-service page would need re-authentication, a scope-consent UI, and a token list with revoke buttons.
+
 ## Schema and existing data
 
-`scripts/migrate.php` initializes an empty database with nine application tables and a checksummed migration record. It uses a named database lock, detects modified applied SQL, and is safe to rerun. MariaDB DDL commits implicitly; the initial table definitions use `IF NOT EXISTS` so an interrupted initialization can resume. Later changes must be separate numbered migrations rather than modifications to an applied schema.
+`scripts/migrate.php` initializes an empty database from `database/schema.sql` (version 1), then applies numbered files in `database/migrations/` (version 2 adds `api_tokens`), recording a checksum for each. It uses a named database lock, detects modified applied SQL, and is safe to rerun. MariaDB DDL commits implicitly; the initial table definitions use `IF NOT EXISTS` so an interrupted initialization can resume. Later changes must be separate numbered migrations rather than modifications to an applied schema. The runner rejects gaps, duplicate versions, edited applied files, and databases that contain a version this checkout does not know.
 
 The original repository contained neither SQL migrations nor a database export. The new schema is derived from its queries and tightened with foreign keys, unique keys, schedule indexes, and check constraints. All table identifiers are lowercase; no Windows-style case-insensitive setting is required. The CI configuration checks this explicitly.
 

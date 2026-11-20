@@ -31,3 +31,14 @@ jobs:
       - name: Verify case-sensitive database defaults
         run: php -r 'require "app/bootstrap.php"; if ((int) query("SELECT @@lower_case_table_names")->fetchColumn() !== 0) exit(1);'
       - run: python3 tests/integration.py
+      - name: Install uv
+        run: pipx install uv==0.13.8
+      - name: MCP server lint
+        working-directory: mcp_server
+        run: |
+          uv sync --locked
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: MCP server unit, protocol, and stdio end-to-end tests
+        working-directory: mcp_server
+        run: uv run pytest -ra
