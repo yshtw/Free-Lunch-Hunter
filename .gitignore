@@ -6,3 +6,6 @@
 final_project/uploads/*
 !final_project/uploads/.gitkeep
 __pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/

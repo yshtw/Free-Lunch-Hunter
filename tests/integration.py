@@ -654,7 +654,10 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(limited['has_more'])
         self.assertEqual([item['activity_id'] for item in client.call('GET', 'activities', params={'q':'100%'})[1]['activities']], [near])
         self.assertEqual(client.call('GET', 'activities', params={'q':MARKER[:5] + '%_search'})[1]['activities'], [])
-        for params in [{'from':'2026-02-30'}, {'limit':'0'}, {'limit':'51'}, {'from':'2099-01-02', 'to':'2099-01-01'}]:
+        self.assertEqual([item['activity_id'] for item in client.call('GET', 'activities', params={'activity_id':far})[1]['activities']], [far])
+        past = int(scalar('SELECT activity_id FROM activities WHERE title=?', [MARKER + '_search_past']))
+        self.assertEqual(client.call('GET', 'activities', params={'activity_id':past})[1]['activities'], [])
+        for params in [{'activity_id':'0'}, {'from':'2026-02-30'}, {'limit':'0'}, {'limit':'51'}, {'from':'2099-01-02', 'to':'2099-01-01'}]:
             self.assertEqual(client.call('GET', 'activities', params=params)[0], 422, params)
 
     def test_27_membership_offer_is_server_computed(self):

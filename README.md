@@ -13,9 +13,10 @@ The backend emphasizes the parts of commerce that must remain correct when reque
 - **Consistent wallet reads:** the API and wallet page read balances, entries, and receipts from one committed snapshot, including when another session completes a transaction.
 - **Explicit access boundaries:** public registration always creates a regular member. Administrator access is granted through a CLI command. Article and activity writes check ownership.
 - **Defensive HTTP handling:** CSRF protection on every mutation, regenerated login sessions, prepared statements, escaped output, validated uploads, and correlated errors without SQL details.
+- **Agent access with least privilege:** an [MCP server](mcp_server/README.md) lets AI agents search events, plan a conflict-free schedule, and redeem points. It uses scoped, revocable API tokens that the backend enforces. Spending requires a server-issued quote, optional in-client human approval, and an idempotency key.
 - **Reproducibility:** a versioned, checksummed schema, Docker Compose, a JSON API contract, and a real MariaDB/HTTP regression suite with concurrent requests and injected storage failure.
 
-PHP 8.4 · MariaDB 11.8 · vanilla JavaScript · Python standard-library tests. The browser UI uses local assets and works without third-party CDNs.
+PHP 8.4 · MariaDB 11.8 · vanilla JavaScript · Python standard-library tests · Python MCP server (`mcp` SDK 2.x, httpx). The browser UI uses local assets and works without third-party CDNs.
 
 ![Desktop activity feed with clearly labeled demo events](docs/screenshots/desktop.png)
 
@@ -76,6 +77,16 @@ Reconciliation tests deliberately introduce a 0.01-point difference, a balanced 
 
 [GitHub Actions](.github/workflows/ci.yml) runs syntax checks and the same suite against case-sensitive MariaDB defaults. Check the pull request's workflow runs for hosted results; the [validation record](docs/validation.md) distinguishes local checks from hosted evidence.
 
+## Use it from an AI agent
+
+The [`mcp_server/`](mcp_server/README.md) package is a Model Context Protocol server. Issue a scoped token for a registered account, then register the server with any MCP client:
+
+```bash
+docker compose exec app php scripts/token.php issue your-registered-email@example.com --scopes=read,schedule:write
+```
+
+Scopes are `read`, `schedule:write`, and `membership:redeem`. Tools that the token cannot use are never shown to the model, and the backend rejects them regardless. See the [MCP server README](mcp_server/README.md) for client configuration, the tool list, the design rationale, and its tests.
+
 ### Check a running installation
 
 ```bash
@@ -92,6 +103,6 @@ The command returns JSON and exits **0** for clean data, **1** for detected inco
 - [OpenAPI contract](docs/openapi.yaml)
 - [Reconciliation and operations](docs/operations.md)
 
-The frontend and API share the same service functions. `app/bootstrap.php` owns HTTP/session boundaries; `app/services.php` owns domain transactions; `app/view.php` contains shared presentation helpers. `final_project/` is the only intended web document root. The original `/final_project/*.php` URLs also work when serving the checkout root for local development, but exposing the full checkout is not the container's configuration.
+The frontend, API, and MCP server share the same service functions; the MCP server reaches them only through the scoped JSON API. `app/bootstrap.php` owns HTTP/session boundaries; `app/services.php` owns domain transactions; `app/view.php` contains shared presentation helpers. `final_project/` is the only intended web document root. The original `/final_project/*.php` URLs also work when serving the checkout root for local development, but exposing the full checkout is not the container's configuration.
 
 This project began as a team-built campus event app. This revision keeps its event/community concept while replacing duplicated page logic with shared services and adding testable commerce behavior. It does not claim production traffic, payment-provider integration, or measured business impact.

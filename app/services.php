@@ -170,7 +170,8 @@ function activity_row(array $row): array
     return $row;
 }
 
-/** Upcoming activities only. Search matches title, place, or description; LIKE wildcards are literal. */
+/** Upcoming activities only. Search matches title, place, or description; LIKE wildcards are literal.
+ * An optional activity_id narrows the result to that one upcoming activity. */
 function search_activities(int $userId, array $filters): array
 {
     $search = text($filters, 'q', 100, false);
@@ -180,13 +181,14 @@ function search_activities(int $userId, array $filters): array
     if ($limit === false || ($to !== null && $to < $from)) {
         throw new HttpError(422, 'limit 需為 1–50，且結束日期不可早於開始日期。');
     }
+    $only = isset($filters['activity_id']) ? positive_id($filters['activity_id']) : null;
     $pattern = '%' . addcslashes($search, '%_\\') . '%';
     $rows = query('SELECT ' . ACTIVITY_COLUMNS . ',
         EXISTS(SELECT 1 FROM join_activity j WHERE j.activity_id=a.activity_id AND j.user_id=?) AS joined
-        FROM activities a WHERE a.act_date>=? AND (? IS NULL OR a.act_date<=?)
+        FROM activities a WHERE a.act_date>=? AND (? IS NULL OR a.act_date<=?) AND (? IS NULL OR a.activity_id=?)
         AND (a.title LIKE ? OR a.place LIKE ? OR a.content LIKE ?)
         ORDER BY a.act_date,a.startt,a.activity_id LIMIT ' . ($limit + 1),
-        [$userId, $from, $to, $to, $pattern, $pattern, $pattern])->fetchAll();
+        [$userId, $from, $to, $to, $only, $only, $pattern, $pattern, $pattern])->fetchAll();
     return ['activities' => array_map('activity_row', array_slice($rows, 0, $limit)), 'has_more' => count($rows) > $limit];
 }
 
